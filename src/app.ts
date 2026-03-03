@@ -35,7 +35,7 @@ app.use(rateLimit({
 
 const auditLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
-    max: 20,
+    max: 200,
     message: { error: 'Audit rate limit exceeded. Max 20 audits per hour.' },
 });
 

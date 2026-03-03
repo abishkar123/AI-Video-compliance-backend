@@ -14,7 +14,9 @@ class VideoIndexerService {
     private subscriptionId: string | undefined;
     private resourceGroup: string | undefined;
     private viName: string | undefined;
-    private credential: DefaultAzureCredential;
+    private apiKey: string | undefined;
+    private credential: DefaultAzureCredential | null | undefined = undefined;
+    private credentialPromise: Promise<DefaultAzureCredential | null> | null = null;
 
     constructor() {
         this.accountId = process.env.AZURE_VI_ACCOUNT_ID;
@@ -22,12 +24,65 @@ class VideoIndexerService {
         this.subscriptionId = process.env.AZURE_SUBSCRIPTION_ID;
         this.resourceGroup = process.env.AZURE_RESOURCE_GROUP;
         this.viName = process.env.AZURE_VI_NAME;
-        this.credential = new DefaultAzureCredential();
+        this.apiKey = process.env.AZURE_VI_API_KEY; // Support direct API Key auth
+
+        // Validate required configuration
+        if (!this.accountId) {
+            logger.warn('WARNING: AZURE_VI_ACCOUNT_ID not configured');
+        }
+
+        // If API key is available, we don't need DefaultAzureCredential
+        if (!this.apiKey) {
+            logger.warn('WARNING: AZURE_VI_API_KEY not configured. Falling back to DefaultAzureCredential authentication.');
+        } else {
+            logger.info('Video Indexer authentication using API key configured');
+        }
+    }
+
+    private async initializeCredential(): Promise<DefaultAzureCredential | null> {
+        // If API key is configured, skip credential initialization
+        if (this.apiKey) {
+            return null;
+        }
+
+        // If already initialized, return cached value
+        if (this.credential !== undefined) {
+            return this.credential;
+        }
+
+        // If already initializing, wait for that promise
+        if (this.credentialPromise) {
+            return this.credentialPromise;
+        }
+
+        // Initialize credential with error handling
+        this.credentialPromise = (async () => {
+            try {
+                const cred = new DefaultAzureCredential();
+                this.credential = cred;
+                return cred;
+            } catch (err: unknown) {
+                logger.error('Failed to initialize DefaultAzureCredential', { err });
+                this.credential = null;
+                return null;
+            }
+        })();
+
+        return this.credentialPromise;
     }
 
     async getArmAccessToken(): Promise<string> {
+        const credential = await this.initializeCredential();
+
+        if (!credential) {
+            throw new Error(
+                'ARM access token cannot be obtained. ' +
+                'Please configure AZURE_VI_API_KEY in your .env file, or ensure Azure CLI is authenticated (az login).'
+            );
+        }
+
         try {
-            const tokenObj = await this.credential.getToken(
+            const tokenObj = await credential.getToken(
                 'https://management.azure.com/.default'
             );
             if (!tokenObj) throw new Error('Failed to get ARM access token');
@@ -38,7 +93,68 @@ class VideoIndexerService {
         }
     }
 
-    async getAccountToken(armToken: string): Promise<string> {
+    async getAccountToken(armToken?: string): Promise<string> {
+        // If we have an API Key, we can get the token directly from the VI Auth API
+        if (this.apiKey) {
+            try {
+                const url = `https://api.videoindexer.ai/auth/${this.location}/Accounts/${this.accountId}/AccessToken?allowEdit=true`;
+                logger.info(`Requesting Video Indexer account token from: ${url}`);
+
+                const response = await axios.get(url, {
+                    headers: { 'Ocp-Apim-Subscription-Key': this.apiKey }
+                });
+
+                logger.info('Video Indexer account token obtained successfully');
+                return response.data;
+            } catch (err: any) {
+                if (err.response?.status === 401) {
+                    logger.error('Authentication failed with Video Indexer (401 Unauthorized)', {
+                        message: 'Your AZURE_VI_API_KEY is invalid, expired, or doesn\'t match your account',
+                        location: this.location,
+                        accountId: this.accountId
+                    });
+                    throw new Error(
+                        'Video Indexer Authentication Failed (401 Unauthorized)\n' +
+                        'Your AZURE_VI_API_KEY appears to be invalid or expired.\n' +
+                        'Please verify:\n' +
+                        '1. API key is correct (from https://www.videoindexer.ai/settings/apis)\n' +
+                        '2. API key hasn\'t expired\n' +
+                        '3. Account ID matches your Video Indexer account\n' +
+                        '4. Location is set to "trial"'
+                    );
+                } else if (err.response?.status === 403) {
+                    logger.error('Access forbidden - API key does not have required permissions', { err });
+                    throw new Error(
+                        'Video Indexer Access Forbidden (403)\n' +
+                        'Your API key doesn\'t have permission to access this account.\n' +
+                        'Check that the API key is associated with the correct Video Indexer account.'
+                    );
+                } else if (err.response?.status === 404) {
+                    logger.error('Video Indexer account not found', { accountId: this.accountId });
+                    throw new Error(
+                        'Video Indexer Account Not Found (404)\n' +
+                        `Account ID: ${this.accountId} not found.\n` +
+                        'Please verify your AZURE_VI_ACCOUNT_ID in .env'
+                    );
+                } else {
+                    logger.error('Unexpected error getting Video Indexer token', {
+                        status: err.response?.status,
+                        message: err.response?.data?.message || err.message
+                    });
+                    throw new Error(
+                        `Video Indexer Token Request Failed\n` +
+                        `Status: ${err.response?.status || 'Unknown'}\n` +
+                        `Error: ${err.response?.data?.message || err.message}`
+                    );
+                }
+            }
+        }
+
+        // Fallback to ARM-based token generation (requires armToken)
+        if (!armToken) {
+            throw new Error('ARM token required if AZURE_VI_API_KEY is not provided');
+        }
+
         const url =
             `https://management.azure.com/subscriptions/${this.subscriptionId}` +
             `/resourceGroups/${this.resourceGroup}` +
@@ -66,7 +182,6 @@ class VideoIndexerService {
         await ytDlp(url, {
             format: 'best',
             output: outputPath,
-            noWarnings: false,
             // @ts-ignore - ytDlp types might be slightly off
             extractorArgs: 'youtube:player_client=android,web',
         });
@@ -79,8 +194,19 @@ class VideoIndexerService {
      * Upload video
      */
     async uploadVideo(videoPath: string, videoName: string): Promise<string> {
-        const armToken = await this.getArmAccessToken();
-        const viToken = await this.getAccountToken(armToken);
+        let viToken: string;
+
+        try {
+            if (this.apiKey) {
+                viToken = await this.getAccountToken();
+            } else {
+                const armToken = await this.getArmAccessToken();
+                viToken = await this.getAccountToken(armToken);
+            }
+        } catch (err: any) {
+            logger.error('Failed to obtain Video Indexer token', { err: err.message });
+            throw err; // Re-throw with better error context already added
+        }
 
         const apiUrl =
             `https://api.videoindexer.ai/${this.location}` +
@@ -98,18 +224,55 @@ class VideoIndexerService {
 
         logger.info(`Uploading ${videoPath} to Azure Video Indexer…`);
 
-        const response = await axios.post(`${apiUrl}?${params}`, form, {
-            headers: form.getHeaders(),
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-        });
+        try {
+            const response = await axios.post(`${apiUrl}?${params}`, form, {
+                headers: form.getHeaders(),
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+            });
 
-        if (response.status !== 200) {
-            throw new Error(`Azure upload failed: ${JSON.stringify(response.data)}`);
+            if (response.status !== 200) {
+                logger.error('Video upload failed', {
+                    status: response.status,
+                    data: response.data
+                });
+                throw new Error(`Azure upload failed: ${JSON.stringify(response.data)}`);
+            }
+
+            logger.info(`Upload accepted. Azure video ID: ${response.data.id}`);
+            return response.data.id;
+        } catch (err: any) {
+            if (err.response?.status === 401) {
+                logger.error('Upload failed - Token expired or invalid', { err });
+                throw new Error(
+                    'Video Upload Failed - Authentication Error (401)\n' +
+                    'The access token expired or became invalid during upload.\n' +
+                    'This can happen with large files. Please try again.'
+                );
+            } else if (err.response?.status === 400) {
+                logger.error('Upload failed - Invalid request', { data: err.response.data });
+                throw new Error(
+                    'Video Upload Failed - Invalid Request (400)\n' +
+                    `Details: ${err.response.data?.message || err.message}`
+                );
+            } else if (err.response?.status === 429) {
+                logger.error('Rate limit exceeded', { err });
+                throw new Error(
+                    'Rate Limit Exceeded (429)\n' +
+                    'You\'ve reached the upload limit. Please wait a moment and try again.'
+                );
+            } else {
+                logger.error('Unexpected upload error', {
+                    status: err.response?.status,
+                    message: err.message
+                });
+                throw new Error(
+                    `Video Upload Failed\n` +
+                    `Status: ${err.response?.status || 'Unknown'}\n` +
+                    `Error: ${err.message}`
+                );
+            }
         }
-
-        logger.info(`✓ Upload accepted. Azure video ID: ${response.data.id}`);
-        return response.data.id;
     }
 
     /**
@@ -119,27 +282,81 @@ class VideoIndexerService {
         logger.info(`Polling Video Indexer for video ${videoId}…`);
 
         while (true) {
-            const armToken = await this.getArmAccessToken();
-            const viToken = await this.getAccountToken(armToken);
+            let viToken: string;
 
-            const url =
-                `https://api.videoindexer.ai/${this.location}` +
-                `/Accounts/${this.accountId}/Videos/${videoId}/Index`;
+            try {
+                if (this.apiKey) {
+                    viToken = await this.getAccountToken();
+                } else {
+                    const armToken = await this.getArmAccessToken();
+                    viToken = await this.getAccountToken(armToken);
+                }
+            } catch (err: any) {
+                logger.error('Failed to refresh token during polling', { err: err.message });
+                throw new Error(
+                    'Token Refresh Failed During Processing\n' +
+                    'Unable to check video processing status.\n' +
+                    err.message
+                );
+            }
 
-            const response = await axios.get(url, {
-                params: { accessToken: viToken },
-            });
+            try {
+                const url =
+                    `https://api.videoindexer.ai/${this.location}` +
+                    `/Accounts/${this.accountId}/Videos/${videoId}/Index`;
 
-            const { state } = response.data;
-            logger.info(`Video Indexer status: ${state}`);
+                const response = await axios.get(url, {
+                    params: { accessToken: viToken },
+                });
 
-            if (onProgress) onProgress(state);
+                const { state } = response.data;
+                logger.info(`Video Indexer status: ${state}`);
 
-            if (state === 'Processed') return response.data;
-            if (state === 'Failed') throw new Error('Video indexing failed in Azure.');
-            if (state === 'Quarantined') throw new Error('Quarantined — copyright violation.');
+                if (onProgress) onProgress(state);
 
-            await new Promise((r) => setTimeout(r, 30_000));
+                if (state === 'Processed') {
+                    logger.info('Video processing completed successfully');
+                    return response.data;
+                }
+                if (state === 'Failed') {
+                    logger.error('Video indexing failed in Azure');
+                    throw new Error('Video Indexing Failed\nThe video could not be indexed. This may be due to:\n- Unsupported video format\n- Corrupted video file\n- Service error');
+                }
+                if (state === 'Quarantined') {
+                    logger.error('Video quarantined - likely copyright violation');
+                    throw new Error('Video Quarantined\nThe video appears to contain copyrighted content and was quarantined for policy reasons.');
+                }
+
+                // Still processing, wait before next poll
+                await new Promise((r) => setTimeout(r, 30_000));
+            } catch (err: any) {
+                if (err.response?.status === 401) {
+                    logger.error('Token expired during polling', { err });
+                    throw new Error(
+                        'Authentication Expired During Processing\n' +
+                        'Your access token expired. Please try uploading the video again.'
+                    );
+                } else if (err.response?.status === 404) {
+                    logger.error('Video not found during polling', { videoId });
+                    throw new Error(
+                        `Video Not Found\n` +
+                        `Video ID ${videoId} could not be found. It may have been deleted.`
+                    );
+                } else if (err.message?.includes('Video Indexing Failed') || err.message?.includes('Quarantined') || err.message?.includes('Authentication Expired')) {
+                    // Re-throw our formatted errors
+                    throw err;
+                } else {
+                    logger.error('Unexpected error during polling', {
+                        status: err.response?.status,
+                        message: err.message
+                    });
+                    throw new Error(
+                        `Processing Status Check Failed\n` +
+                        `Status: ${err.response?.status || 'Unknown'}\n` +
+                        `Error: ${err.message}`
+                    );
+                }
+            }
         }
     }
 

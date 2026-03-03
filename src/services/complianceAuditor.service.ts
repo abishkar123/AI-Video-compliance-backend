@@ -125,21 +125,24 @@ ON-SCREEN TEXT (OCR): ${JSON.stringify(ocrText)}
      * Full compliance audit pipeline
      */
     async audit({ transcript, ocrText = [], videoMetadata = { duration: null, platform: 'youtube' } }: AuditParams): Promise<AuditResult> {
-        if (!transcript) {
+        const hasTranscript = !!(transcript && transcript.trim().length > 0);
+        const hasOCR = !!(ocrText && ocrText.length > 0 && ocrText.some(t => t.trim().length > 0));
+
+        if (!hasTranscript && !hasOCR) {
             return {
                 complianceResults: [],
                 finalStatus: 'FAIL',
-                finalReport: 'Audit skipped — no transcript available (video processing likely failed).',
+                finalReport: 'Audit skipped — no transcript or on-screen text available. Video processing may have yielded no data, or the video is silent with no text.',
             };
         }
 
-        logger.info('[Auditor] Starting RAG compliance audit…');
+        logger.info(`[Auditor] Starting RAG compliance audit (Transcript: ${hasTranscript}, OCR: ${hasOCR})…`);
 
-        const queryText = `${transcript} ${ocrText.join(' ')}`;
+        const queryText = `${transcript || ''} ${ocrText.join(' ')}`.trim();
         const retrievedRules = await this.retrieveComplianceRules(queryText);
 
         const auditData = await this.auditWithLLM(
-            transcript,
+            transcript || '',
             ocrText,
             videoMetadata,
             retrievedRules

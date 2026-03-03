@@ -8,6 +8,7 @@ node_modules/
 # ========================
 .env
 .env.local
+.env.example
 .env.development
 .env.production
 .env.staging
