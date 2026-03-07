@@ -40,9 +40,9 @@ backend/
 
 ## 🏗️ System Design
 
-![ComplianceQA Architecture](../backend/data/img/Full%20system%20design.png)
+![ComplianceQA Architecture](data/img/Full%20system%20design.png)
 
-![Workflow Diagram](../backend/data/img/System%20design.png)
+![Workflow Diagram](data/img/System%20design.png)
 
 *High-level architecture and processing workflow showing the flow between the React Frontend, Node.js API, and Azure AI Services.*
 
