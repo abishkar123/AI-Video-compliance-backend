@@ -17,10 +17,17 @@ export function listDocuments(_req: Request, res: Response): Response {
             return res.json({ documents: [], dataDir: DATA_DIR });
         }
         const files = fs.readdirSync(DATA_DIR).filter((f) => f.endsWith('.pdf'));
-        return res.json({ documents: files, dataDir: DATA_DIR, count: files.length });
+        return res.json({
+            documents: files,
+            dataDir: DATA_DIR,
+            count: files.length,
+        });
     } catch (err: unknown) {
         const error = err as Error;
-        return res.status(500).json({ error: error.message });
+        return res.status(500).json({
+            statusCode: 500,
+            message: error.message,
+        });
     }
 }
 
@@ -33,14 +40,16 @@ export async function indexDocuments(_req: Request, res: Response): Promise<Resp
     try {
         if (!fs.existsSync(DATA_DIR)) {
             return res.status(400).json({
-                error: `Data directory not found: ${DATA_DIR}. Create it and add PDF files.`,
+                statusCode: 400,
+                message: `Data directory not found: ${DATA_DIR}. Create it and add PDF files.`,
             });
         }
 
         const pdfFiles = fs.readdirSync(DATA_DIR).filter((f) => f.endsWith('.pdf'));
         if (pdfFiles.length === 0) {
             return res.status(400).json({
-                error: `No PDF files found in ${DATA_DIR}. Add compliance PDFs and retry.`,
+                statusCode: 400,
+                message: `No PDF files found in ${DATA_DIR}. Add compliance PDFs and retry.`,
             });
         }
 
@@ -54,6 +63,9 @@ export async function indexDocuments(_req: Request, res: Response): Promise<Resp
     } catch (err: unknown) {
         const error = err as Error;
         logger.error('Document indexing failed', { err: error });
-        return res.status(500).json({ error: error.message });
+        return res.status(500).json({
+            statusCode: 500,
+            message: error.message,
+        });
     }
 }

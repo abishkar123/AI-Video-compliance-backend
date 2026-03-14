@@ -30,7 +30,10 @@ export function listRuns(req: Request, res: Response): void {
 export function getRun(req: Request, res: Response): void {
     const run = graphRunStore.get(req.params.runId as string);
     if (!run) {
-        res.status(404).json({ error: `No run found: ${req.params.runId}` });
+        res.status(404).json({
+            statusCode: 404,
+            message: `No run found: ${req.params.runId}`,
+        });
         return;
     }
     res.json(run);

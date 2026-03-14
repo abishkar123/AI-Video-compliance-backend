@@ -57,13 +57,17 @@ export async function startAudit(req: Request, res: Response): Promise<Response>
     const file = (req as any).file;
 
     if (!bodyUrl && !file) {
-        return res.status(400).json({ error: 'Please provide a video URL or upload a file.' });
+        return res.status(400).json({
+            statusCode: 400,
+            message: 'Please provide a video URL or upload a file.',
+        });
     }
 
     const videoUrl = bodyUrl || file?.originalname || 'Uploaded Video';
     const videoPath = file?.path; // Mutex temp path
     const sessionId = uuidv4();
-    const videoId = `vid_${sessionId.slice(0, 8)}`;
+    // Simple video ID - upload service handles randomization
+    const videoId = `v_${sessionId.slice(0, 8)}`;
 
     logger.info(`[Audit] New job ${sessionId} — Source: ${videoUrl}`);
     createJob(sessionId, videoUrl, videoPath);
@@ -85,7 +89,11 @@ export async function startAudit(req: Request, res: Response): Promise<Response>
 /** GET /api/audit/:sessionId */
 export function getJobStatus(req: Request, res: Response): Response {
     const job = jobs.get(req.params.sessionId as string);
-    if (!job) return res.status(404).json({ error: `No job: ${req.params.sessionId}` });
+    if (!job)
+        return res.status(404).json({
+            statusCode: 404,
+            message: `No job: ${req.params.sessionId}`,
+        });
     return res.json(job);
 }
 
@@ -129,7 +137,10 @@ export async function submitFeedback(req: Request, res: Response): Promise<Respo
         }
 
         if (!run) {
-            return res.status(404).json({ error: 'LangSmith trace not found yet. Try again in a moment.' });
+            return res.status(404).json({
+                statusCode: 404,
+                message: 'LangSmith trace not found yet. Try again in a moment.',
+            });
         }
 
         await lsClient.createFeedback(run.id, key, {
@@ -140,7 +151,10 @@ export async function submitFeedback(req: Request, res: Response): Promise<Respo
         return res.json({ success: true, message: 'Feedback synced to LangSmith.' });
     } catch (err: unknown) {
         logger.error('Failed to submit LangSmith feedback', { err });
-        return res.status(500).json({ error: 'Feedback sync failed.' });
+        return res.status(500).json({
+            statusCode: 500,
+            message: 'Feedback sync failed.',
+        });
     }
 }
 
